@@ -29,8 +29,10 @@ from sklearn.model_selection import train_test_split
 # ─── PATHS ────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 DATASET_DIR  = os.path.join(SCRIPT_DIR, "datasets")
-CSV_PATH     = os.path.join(DATASET_DIR, "openreview_labeled_2k.csv")
+OPENREVIEW_CSV = "openreview_labeled_2k.csv"  # Hub: openreview/openreview_labeled_2k.csv
 OUTPUT_DIR   = os.path.join(DATASET_DIR, "distilbert_sentiment")
 
 BASE_MODEL   = "distilbert-base-uncased"
@@ -66,56 +68,37 @@ def _get_hf_token():
     return os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACE_HUB_TOKEN")
 
 
-def _resolve_dataset_csv(csv_path: str) -> str | None:
-    filename = os.path.basename(csv_path)
-    dataset_dir = os.path.dirname(csv_path)
-    local_candidates = [
-        csv_path,
-        os.path.join(dataset_dir, "openreview", filename),
-    ]
-    for candidate in local_candidates:
-        if os.path.isfile(candidate):
-            return candidate
+def _download_dataset_csv(filename: str) -> str | None:
+    from hf_datasets import hub_download_dataset_file
+
     if not HF_DATASET_REPO:
         return None
     try:
-        from huggingface_hub import hf_hub_download
-        from huggingface_hub.utils import EntryNotFoundError
+        return hub_download_dataset_file(
+            HF_DATASET_REPO,
+            filename,
+            revision=HF_DATASET_REVISION,
+            token=_get_hf_token(),
+        )
     except ImportError as e:
         print(f"\nERROR: Missing dependency — {e}")
         print("Install with: pip install huggingface_hub\n")
         return None
-    candidates = [
-        f"openreview/{filename}",
-        filename,
-    ]
-    for candidate in candidates:
-        try:
-            return hf_hub_download(
-                repo_id=HF_DATASET_REPO,
-                filename=candidate,
-                repo_type="dataset",
-                revision=HF_DATASET_REVISION,
-                token=_get_hf_token(),
-            )
-        except EntryNotFoundError:
-            continue
-    return None
 
 
-def load_openreview(csv_path: str) -> tuple[list[str], list[int]]:
+def load_openreview(filename: str = OPENREVIEW_CSV) -> tuple[list[str], list[int]]:
     """
     Reads openreview_labeled_2k.csv and returns (messages, label_ids).
     Rows with missing/invalid labels are skipped with a warning.
     """
-    resolved_csv = _resolve_dataset_csv(csv_path)
+    resolved_csv = _download_dataset_csv(filename)
     if not resolved_csv:
-        print(f"\nERROR: Dataset not found: {csv_path}")
-        if HF_DATASET_REPO:
-            print(f"  Also checked Hugging Face dataset repo: {HF_DATASET_REPO}")
-        print("Download the OpenReview 2025 labeled commit dataset and place it at:")
-        print(f"  {csv_path}")
-        print("  Source: https://openreview.net/forum?id=FPLNSx1jmL\n")
+        rev = f" (revision={HF_DATASET_REVISION})" if HF_DATASET_REVISION else ""
+        print(f"\nERROR: Could not download dataset from Hugging Face.")
+        print(f"  Repo: {HF_DATASET_REPO}{rev}")
+        print(f"  File: openreview/{filename}")
+        print("  Set GOMI_DATASET_REPO and HF_TOKEN if the repo is private.")
+        print("  Clear GOMI_DATASET_REVISION until that tag exists on the Hub.\n")
         sys.exit(1)
 
     messages, label_ids = [], []
@@ -166,14 +149,14 @@ def train():
     print("=" * 60)
     print("  GOMI — DistilBERT Sentiment Fine-tuning")
     print(f"  Base model : {BASE_MODEL}")
-    print(f"  Dataset    : {CSV_PATH}")
+    print(f"  Dataset    : {HF_DATASET_REPO}/openreview/{OPENREVIEW_CSV}")
     print(f"  Output     : {OUTPUT_DIR}")
     print(f"  Epochs     : {NUM_EPOCHS}  |  LR: {LEARNING_RATE}  |  Batch: {BATCH_SIZE}")
     print("=" * 60)
 
     # ── Load data ─────────────────────────────────────────────────────────────
     print("\n[1/4] Loading OpenReview 2025 dataset...")
-    messages, label_ids = load_openreview(CSV_PATH)
+    messages, label_ids = load_openreview()
 
     train_msgs, val_msgs, train_labels, val_labels = train_test_split(
         messages, label_ids,

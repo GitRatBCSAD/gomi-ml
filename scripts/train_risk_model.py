@@ -12,8 +12,7 @@
 #
 # Prerequisites:
 #   - scripts/datasets/distilbert_sentiment/  (run train_sentiment.py first)
-#   - DeepJIT .pkl files and/or apachejit_commits.csv under scripts/datasets/
-#     (or set GOMI_DATASET_REPO to pull from Hugging Face)
+#   - JIT datasets pulled from GOMI_DATASET_REPO on Hugging Face (required)
 #
 # Usage (from repo root):
 #   uv run python scripts/train_risk_model.py

@@ -52,39 +52,21 @@ def _dataset_subdir_for_filename(filename: str) -> str | None:
 
 
 def _resolve_dataset_file(path: Path) -> Path | None:
-    if path.is_file():
-        return path
-    subdir = _dataset_subdir_for_filename(path.name)
-    if subdir:
-        local_subdir = path.parent / subdir / path.name
-        if local_subdir.is_file():
-            return local_subdir
+    from hf_datasets import hub_download_dataset_file
+
     if not HF_DATASET_REPO:
         return None
     try:
-        from huggingface_hub import hf_hub_download
-        from huggingface_hub.utils import EntryNotFoundError
+        downloaded = hub_download_dataset_file(
+            HF_DATASET_REPO,
+            path.name,
+            revision=HF_DATASET_REVISION,
+            token=_get_hf_token(),
+        )
     except ImportError as e:
         print(f"\nERROR: Missing dependency — {e}")
         print("Install with: pip install huggingface_hub\n")
         return None
-    candidates = []
-    if subdir:
-        candidates.append(f"{subdir}/{path.name}")
-    candidates.append(path.name)
-    downloaded = None
-    for candidate in candidates:
-        try:
-            downloaded = hf_hub_download(
-                repo_id=HF_DATASET_REPO,
-                filename=candidate,
-                repo_type="dataset",
-                revision=HF_DATASET_REVISION,
-                token=_get_hf_token(),
-            )
-            break
-        except EntryNotFoundError:
-            continue
     if not downloaded:
         return None
     return Path(downloaded)

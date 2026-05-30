@@ -126,32 +126,19 @@ def _dataset_subdir_for_filename(filename: str) -> str | None:
 
 
 def _resolve_dataset_file(filename):
-    local_path = os.path.join(DATASET_DIR, filename)
-    if os.path.isfile(local_path):
-        return local_path
-    subdir = _dataset_subdir_for_filename(filename)
-    if subdir:
-        local_subdir_path = os.path.join(DATASET_DIR, subdir, filename)
-        if os.path.isfile(local_subdir_path):
-            return local_subdir_path
+    scripts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from hf_datasets import hub_download_dataset_file
+
     if not HF_DATASET_REPO:
         return None
-    candidates = []
-    if subdir:
-        candidates.append(f"{subdir}/{filename}")
-    candidates.append(filename)
-    for candidate in candidates:
-        try:
-            return hf_hub_download(
-                repo_id=HF_DATASET_REPO,
-                filename=candidate,
-                repo_type="dataset",
-                revision=HF_DATASET_REVISION,
-                token=_get_hf_token(),
-            )
-        except EntryNotFoundError:
-            continue
-    return None
+    return hub_download_dataset_file(
+        HF_DATASET_REPO,
+        filename,
+        revision=HF_DATASET_REVISION,
+        token=_get_hf_token(),
+    )
 
 def strip_prefix(message: str) -> str:
     """

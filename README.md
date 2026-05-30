@@ -45,11 +45,10 @@ uv run python gomi.py ../my-project
 | `GOMI_DATASET_REVISION` | Optional tag/commit for datasets. |
 | `HF_TOKEN` / `HUGGINGFACE_HUB_TOKEN` | Access token for private repos. |
 
-Make sure to set the environment variables as our models and datasets are being loaded from our huggingface repo.
+Training datasets are **always downloaded from Hugging Face** (`GOMI_DATASET_REPO`, default `GitRatBCSAD/gomi-datasets`). No local dataset copies are used.
 
-If the `GOMI_*_REPO` variables are not set, the scripts fall back to local files under `scripts/datasets/` or `datasets/`, including `openreview/` and `jit/` subfolders.
-You can place these variables in a `.env` at the repo root — the scripts auto-load it via `python-dotenv`.
+Place env vars in a `.env` at the repo root — scripts auto-load it via `python-dotenv`. Clear `GOMI_DATASET_REVISION` until that tag exists on the Hub.
 
 ### Inference workflow (pull on startup)
-- `gomi.py` loads the sentiment and risk models from local paths when available; otherwise it pulls from HF Hub.
+- `gomi.py` pulls JIT/OpenReview datasets from the HF dataset repo; sentiment and risk **models** load from `scripts/datasets/` after training, or from HF model repos when `GOMI_*_MODEL_REPO` is set.
 
