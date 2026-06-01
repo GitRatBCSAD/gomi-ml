@@ -229,11 +229,18 @@ def train():
     else:
         msgs_5k, ids_5k = load_openreview(OPENREVIEW_5K_CSV, min_confidence=MIN_CONFIDENCE)
 
+    print("  [1.6k SentiCR human-labeled]")
+    try:
+        msgs_scr, ids_scr = load_openreview("senticr_labeled.csv", min_confidence=None)
+    except Exception as e:
+        print(f"    [skip] SentiCR not found: {e}")
+        msgs_scr, ids_scr = [], []
+
     # Combine: human-labeled first (higher quality), then auto-labeled
-    messages  = msgs_2k + msgs_5k
-    label_ids = ids_2k  + ids_5k
+    messages  = msgs_2k + msgs_5k + msgs_scr
+    label_ids = ids_2k  + ids_5k  + ids_scr
     print(f"\n  Combined: {len(messages)} total samples "
-          f"({len(msgs_2k)} human + {len(msgs_5k)} auto-labeled)")
+          f"({len(msgs_2k)} OR human + {len(msgs_5k)} auto-labeled + {len(msgs_scr)} SentiCR)")
 
     train_msgs, val_msgs, train_labels, val_labels = train_test_split(
         messages, label_ids,
