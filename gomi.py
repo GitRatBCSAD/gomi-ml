@@ -70,6 +70,8 @@ APACHEJIT_CSV = os.path.join(DATASET_DIR, "apachejit_commits.csv")
 RISK_MODEL_PATH = os.path.join(DATASET_DIR, "risk_model.joblib")
 RISK_SHAP_BACKGROUND_PATH = os.path.join(DATASET_DIR, "risk_model_shap_background.npy")
 
+SCALER_PATH = os.path.join(DATASET_DIR, "gomi_scaler.joblib")
+
 # Hugging Face Hub configuration (optional)
 HF_SENTIMENT_MODEL_REPO = os.getenv("GOMI_SENTIMENT_MODEL_REPO")
 HF_SENTIMENT_MODEL_REVISION = os.getenv("GOMI_SENTIMENT_MODEL_REVISION")
@@ -172,26 +174,26 @@ def load_sentiment_model():
     Returns a HuggingFace text-classification pipeline ready for inference.
     The pipeline handles tokenization and softmax internally.
     """
-    model_source = SENTIMENT_MODEL_DIR
-    revision = None
-    if not os.path.isdir(SENTIMENT_MODEL_DIR):
-        if not HF_SENTIMENT_MODEL_REPO:
-            print(
-                f"\n  ERROR: Fine-tuned DistilBERT model not found at:\n"
-                f"    {SENTIMENT_MODEL_DIR}\n\n"
-                f"  Run scripts/train_sentiment.py first to fine-tune on OpenReview 2025, or\n"
-                f"  set GOMI_SENTIMENT_MODEL_REPO to a Hugging Face model repo.\n"
-                f"  (Optional) Use GOMI_SENTIMENT_MODEL_REVISION to pin a tag or commit.\n"
-            )
-            sys.exit(1)
+    # ALWAYS force cloud download if repo is configured
+    if HF_SENTIMENT_MODEL_REPO:
         model_source = HF_SENTIMENT_MODEL_REPO
         revision = HF_SENTIMENT_MODEL_REVISION
         if _get_hf_token() is None:
             print("  NOTE: HF_TOKEN or HUGGINGFACE_HUB_TOKEN not set; private repos will fail.")
+    else:
+        model_source = SENTIMENT_MODEL_DIR
+        revision = None
+        if not os.path.isdir(SENTIMENT_MODEL_DIR):
+            print(
+                f"\n  ERROR: Cloud repo not configured and local model not found at:\n"
+                f"    {SENTIMENT_MODEL_DIR}\n\n"
+                f"  Set GOMI_SENTIMENT_MODEL_REPO in your .env file!\n"
+            )
+            sys.exit(1)
 
     token = _get_hf_token()
-    tokenizer = AutoTokenizer.from_pretrained(model_source, revision=revision, token=token)
-    model = AutoModelForSequenceClassification.from_pretrained(model_source, revision=revision, token=token)
+    tokenizer = AutoTokenizer.from_pretrained(model_source, revision=revision, token=token, force_download=True if HF_SENTIMENT_MODEL_REPO else False)
+    model = AutoModelForSequenceClassification.from_pretrained(model_source, revision=revision, token=token, force_download=True if HF_SENTIMENT_MODEL_REPO else False)
     classifier = hf_pipeline(
         "text-classification",
         model=model,
@@ -535,18 +537,8 @@ def load_risk_model() -> tuple:
 
     Returns: (trained LR model, X_train numpy array for SHAP background)
     """
-    model_path = RISK_MODEL_PATH
-    shap_path = RISK_SHAP_BACKGROUND_PATH
-    if not os.path.isfile(model_path) or not os.path.isfile(shap_path):
-        if not HF_RISK_MODEL_REPO:
-            print(
-                f"\n  ERROR: Pre-trained risk model not found.\n"
-                f"    Expected: {RISK_MODEL_PATH}\n"
-                f"              {RISK_SHAP_BACKGROUND_PATH}\n\n"
-                f"  Run scripts/train_risk_model.py first (requires DistilBERT + JIT datasets),\n"
-                f"  or set GOMI_RISK_MODEL_REPO to a Hugging Face model repo.\n"
-            )
-            sys.exit(1)
+    # ALWAYS force cloud download if repo is configured
+    if HF_RISK_MODEL_REPO:
         if _get_hf_token() is None:
             print("  NOTE: HF_TOKEN or HUGGINGFACE_HUB_TOKEN not set; private repos will fail.")
         model_path = hf_hub_download(
@@ -555,6 +547,7 @@ def load_risk_model() -> tuple:
             repo_type="model",
             revision=HF_RISK_MODEL_REVISION,
             token=_get_hf_token(),
+            force_download=True,  # ALWAYS override local cache
         )
         shap_path = hf_hub_download(
             repo_id=HF_RISK_MODEL_REPO,
@@ -562,10 +555,43 @@ def load_risk_model() -> tuple:
             repo_type="model",
             revision=HF_RISK_MODEL_REVISION,
             token=_get_hf_token(),
+            force_download=True,  # ALWAYS override local cache
         )
+        try:
+            scaler_path = hf_hub_download(
+                repo_id=HF_RISK_MODEL_REPO,
+                filename=os.path.basename(SCALER_PATH),
+                repo_type="model",
+                revision=HF_RISK_MODEL_REVISION,
+                token=_get_hf_token(),
+                force_download=True,  # ALWAYS override local cache
+            )
+        except EntryNotFoundError:
+            print(
+                f"\n  ERROR: Scaler not found in HF repo: {HF_RISK_MODEL_REPO}\n"
+                f"  Expected file: {os.path.basename(SCALER_PATH)}\n"
+                f"  Upload the scaler or update SCALER_PATH.\n"
+            )
+            sys.exit(1)
+    else:
+        model_path = RISK_MODEL_PATH
+        shap_path = RISK_SHAP_BACKGROUND_PATH
+        scaler_path = SCALER_PATH
+        if not os.path.isfile(model_path) or not os.path.isfile(shap_path):
+            print(
+                f"\n  ERROR: Cloud repo not configured and local model not found.\n"
+                f"  Set GOMI_RISK_MODEL_REPO in your .env file!\n"
+            )
+            sys.exit(1)
 
     model = joblib.load(model_path)
     X_train = np.load(shap_path)
+
+    if os.path.isfile(scaler_path):
+        scaler = joblib.load(scaler_path)
+    else:
+        print(f"ERROR: Scaler not found at {scaler_path}. Did you run the training cell?")
+        sys.exit(1)
 
     source_desc = model_path
     if model_path != RISK_MODEL_PATH:
@@ -578,7 +604,7 @@ def load_risk_model() -> tuple:
     print(f"  Intercept: {model.intercept_[0]:.4f}")
     print(f"  SHAP background: {len(X_train)} training samples")
 
-    return model, X_train
+    return model, X_train, scaler
 
 
 # ─── LAYER 4: SHAP ────────────────────────────────────────────────────────────
@@ -755,7 +781,7 @@ def run_gomi(repo_path: str, top_n: int = 10) -> None:
 
     # ── Layer 3: load pre-trained LR (train once via scripts/train_risk_model.py) ─
     print("\n[2/5] Loading risk model (DeepJIT + ApacheJIT)...")
-    risk_model, X_train = load_risk_model()
+    risk_model, X_train, scaler = load_risk_model()
 
     # ── Git history (6-month window) ──────────────────────────────────────────
     print(f"\n[3/5] Extracting git history (last {ANALYSIS_WINDOW_DAYS} days)...")
@@ -798,12 +824,12 @@ def run_gomi(repo_path: str, top_n: int = 10) -> None:
         complexity_score = percentile_rank(raw_complexity[rel]["AvgCCN"], all_ccn)
 
         # Layer 3: Logistic Regression risk score
-        X_file     = np.array([[sentiment_score, complexity_score, low_info_ratio]])
-        risk_score = float(risk_model.predict_proba(X_file)[0][1])
-
+        X_file_raw = np.array([[sentiment_score, complexity_score, low_info_ratio]])
+        X_file_scaled = scaler.transform(X_file_raw)
+        risk_score = float(risk_model.predict_proba(X_file_scaled)[0][1])
         # Layer 4: SHAP breakdown
         try:
-            shap_out = compute_shap(risk_model, X_train, X_file)
+            shap_out = compute_shap(risk_model, X_train, X_file_scaled)
         except Exception:
             shap_out = {
                 "base_rate": 0.0,
