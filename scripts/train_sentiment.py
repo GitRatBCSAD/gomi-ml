@@ -72,7 +72,7 @@ RANDOM_SEED   = 42
 # Confidence threshold for auto-labeled samples from label_5k.py
 # Rows where DistilBERT confidence < MIN_CONFIDENCE are excluded from training.
 # 0.50 keeps ~95% of 5k rows; raise to 0.60 for a stricter quality filter.
-MIN_CONFIDENCE = 0.50
+MIN_CONFIDENCE = 0.90
 
 # ─── LOAD DATASET ─────────────────────────────────────────────────────────────
 
