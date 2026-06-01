@@ -1,11 +1,10 @@
 """
 label_5k.py — Apply trained DistilBERT sentiment model to 5k unlabeled commits.
 
-Reads:  datasets/openreview/cleaned20k.csv           (full cleaned corpus)
-        datasets/openreview/openreview_labeled_2k.csv (already labeled — excluded)
-Model:  scripts/datasets/distilbert_sentiment
+Reads:  Hugging Face gomi-datasets (cleaned20k.csv, openreview_labeled_2k.csv)
+Model:  scripts/datasets/distilbert_sentiment (or GOMI_SENTIMENT_MODEL_REPO)
 
-Writes: datasets/openreview/openreview_labeled_5k_auto.csv
+Writes: scripts/datasets/openreview/openreview_labeled_5k_auto.csv
         Columns: commit, author, date, repo, message, reconciled_emotion, confidence
 """
 
@@ -16,13 +15,16 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-ROOT = Path(__file__).parent.parent
-DATASET_DIR       = ROOT / "datasets"
-SCRIPTS_DS_DIR    = ROOT / "scripts" / "datasets"
-CLEANED_CSV       = DATASET_DIR / "cleaned20k.csv"
-LABELED_CSV       = DATASET_DIR / "openreview_labeled_2k.csv"
-MODEL_DIR         = SCRIPTS_DS_DIR / "distilbert_sentiment"
-OUTPUT_CSV        = DATASET_DIR / "openreview_labeled_5k_auto.csv"
+SCRIPT_DIR = Path(__file__).parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+ROOT = SCRIPT_DIR.parent
+SCRIPTS_DS_DIR = ROOT / "scripts" / "datasets"
+OPENREVIEW_DIR = SCRIPTS_DS_DIR / "openreview"
+CLEANED_CSV = OPENREVIEW_DIR / "cleaned20k.csv"
+LABELED_CSV = OPENREVIEW_DIR / "openreview_labeled_2k.csv"
+MODEL_DIR = SCRIPTS_DS_DIR / "distilbert_sentiment"
+OUTPUT_CSV = OPENREVIEW_DIR / "openreview_labeled_5k_auto.csv"
 
 SAMPLE_SIZE  = 5000
 BATCH_SIZE   = 64
@@ -156,6 +158,7 @@ def main():
         print(f"  [{done}/{total}]", end="\r", flush=True)
 
     print(f"\nInference done. Writing {OUTPUT_CSV} ...")
+    OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
 
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(

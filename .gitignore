@@ -64,3 +64,5 @@ poetry.lock
 # PyInstaller
 *.spec
 
+scripts/datasets/
+datasets/
