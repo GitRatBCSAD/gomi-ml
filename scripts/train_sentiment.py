@@ -1,7 +1,11 @@
 # train_sentiment.py — One-time offline training script
 #
-# Fine-tunes distilbert-base-uncased on the OpenReview 2025 dataset
-# (openreview/openreview_labeled_2k.csv) for 4-class commit message sentiment.
+# Fine-tunes distilbert-base-uncased on the combined OpenReview 2025 dataset:
+#   - openreview_labeled_2k.csv  (2,000 human-labeled — gold standard)
+#   - openreview_labeled_5k_auto.csv (5,000 auto-labeled by DistilBERT, filtered
+#     by confidence >= MIN_CONFIDENCE to keep only reliable labels)
+#
+# Combined: ~7,000 training samples (2.5x more than the 2k-only run)
 #
 # Labels: frustration | caution | neutral | satisfaction
 # Risk-positive labels (used by gomi.py): frustration, caution
@@ -35,6 +39,9 @@ DATASET_DIR  = os.path.join(SCRIPT_DIR, "datasets")
 OPENREVIEW_CSV = "openreview_labeled_2k.csv"  # Hub: openreview/openreview_labeled_2k.csv
 OUTPUT_DIR   = os.path.join(DATASET_DIR, "distilbert_sentiment")
 
+# 5k auto-labeled dataset (produced by label_5k.py)
+OPENREVIEW_5K_CSV = "openreview_labeled_5k_auto.csv"  # Hub: openreview/openreview_labeled_5k_auto.csv
+
 BASE_MODEL   = "distilbert-base-uncased"
 
 # Hugging Face Hub (optional)
@@ -54,13 +61,18 @@ VALID_EMOTIONS = set(LABELS)
 
 # ─── HYPERPARAMETERS ──────────────────────────────────────────────────────────
 
-MAX_LENGTH   = 128      # commit messages rarely exceed 128 tokens
-BATCH_SIZE   = 16
-NUM_EPOCHS   = 4        # 4 epochs on 2k samples; adjust if val loss plateaus
-LEARNING_RATE = 2e-5   # standard for DistilBERT fine-tuning
+MAX_LENGTH    = 128      # commit messages rarely exceed 128 tokens
+BATCH_SIZE    = 32       # larger batch for ~7k dataset (was 16)
+NUM_EPOCHS    = 5        # 5 epochs on ~7k combined dataset (was 4 on 2k)
+LEARNING_RATE = 2e-5    # standard for DistilBERT fine-tuning
 WEIGHT_DECAY  = 0.01
-TEST_SIZE     = 0.15    # 15% held out for evaluation reporting (not used by gomi.py)
+TEST_SIZE     = 0.15     # 15% held out for evaluation reporting (not used by gomi.py)
 RANDOM_SEED   = 42
+
+# Confidence threshold for auto-labeled samples from label_5k.py
+# Rows where DistilBERT confidence < MIN_CONFIDENCE are excluded from training.
+# 0.50 keeps ~95% of 5k rows; raise to 0.60 for a stricter quality filter.
+MIN_CONFIDENCE = 0.50
 
 # ─── LOAD DATASET ─────────────────────────────────────────────────────────────
 
@@ -86,10 +98,18 @@ def _download_dataset_csv(filename: str) -> str | None:
         return None
 
 
-def load_openreview(filename: str = OPENREVIEW_CSV) -> tuple[list[str], list[int]]:
+def load_openreview(
+    filename: str = OPENREVIEW_CSV,
+    min_confidence: float | None = None,
+) -> tuple[list[str], list[int]]:
     """
-    Reads openreview_labeled_2k.csv and returns (messages, label_ids).
-    Rows with missing/invalid labels are skipped with a warning.
+    Reads a labeled OpenReview CSV and returns (messages, label_ids).
+
+    For the human-labeled 2k dataset, min_confidence is ignored (no column).
+    For the auto-labeled 5k dataset, rows below min_confidence are skipped
+    to filter out low-quality auto-labels.
+
+    Rows with missing/invalid labels are always skipped.
     """
     resolved_csv = _download_dataset_csv(filename)
     if not resolved_csv:
@@ -103,6 +123,7 @@ def load_openreview(filename: str = OPENREVIEW_CSV) -> tuple[list[str], list[int
 
     messages, label_ids = [], []
     skipped = 0
+    low_conf = 0
 
     with open(resolved_csv, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -112,10 +133,22 @@ def load_openreview(filename: str = OPENREVIEW_CSV) -> tuple[list[str], list[int
             if not msg or emotion not in VALID_EMOTIONS:
                 skipped += 1
                 continue
+            # Confidence filtering: only applies when the column exists
+            if min_confidence is not None and "confidence" in row:
+                try:
+                    conf = float(row["confidence"])
+                    if conf < min_confidence:
+                        low_conf += 1
+                        continue
+                except (ValueError, TypeError):
+                    pass
             messages.append(msg)
             label_ids.append(LABEL2ID[emotion])
 
-    print(f"  Loaded {len(messages)} rows  ({skipped} skipped — missing/invalid label)")
+    note = ""
+    if low_conf:
+        note = f", {low_conf} below confidence {min_confidence}"
+    print(f"  Loaded {len(messages)} rows  ({skipped} skipped — missing/invalid label{note})")
 
     # Print label distribution so class imbalance is visible
     from collections import Counter
@@ -149,14 +182,58 @@ def train():
     print("=" * 60)
     print("  GOMI — DistilBERT Sentiment Fine-tuning")
     print(f"  Base model : {BASE_MODEL}")
-    print(f"  Dataset    : {HF_DATASET_REPO}/openreview/{OPENREVIEW_CSV}")
+    print(f"  Dataset    : {HF_DATASET_REPO}/openreview/{OPENREVIEW_CSV} + {OPENREVIEW_5K_CSV} (conf>={MIN_CONFIDENCE})")
     print(f"  Output     : {OUTPUT_DIR}")
     print(f"  Epochs     : {NUM_EPOCHS}  |  LR: {LEARNING_RATE}  |  Batch: {BATCH_SIZE}")
     print("=" * 60)
 
     # ── Load data ─────────────────────────────────────────────────────────────
-    print("\n[1/4] Loading OpenReview 2025 dataset...")
-    messages, label_ids = load_openreview()
+    print("\n[1/4] Loading combined OpenReview dataset (2k human + 5k auto)...")
+
+    # Source 1: 2k human-labeled — gold standard, no confidence filtering
+    print("  [2k human-labeled]")
+    msgs_2k, ids_2k = load_openreview(OPENREVIEW_CSV, min_confidence=None)
+
+    # Source 2: 5k auto-labeled — filter by confidence to keep reliable labels
+    print(f"  [5k auto-labeled, confidence >= {MIN_CONFIDENCE}]")
+    # Check locally first, then fall back to HuggingFace
+    local_5k = os.path.join(DATASET_DIR, "openreview", OPENREVIEW_5K_CSV)
+    if os.path.isfile(local_5k):
+        # Load directly from local file (already downloaded by label_5k.py)
+        import csv as _csv
+        msgs_5k, ids_5k = [], []
+        skipped_5k, low_conf_5k = 0, 0
+        with open(local_5k, newline="", encoding="utf-8") as f:
+            for row in _csv.DictReader(f):
+                msg     = row.get("message", "").strip()
+                emotion = row.get("reconciled_emotion", "").strip().lower()
+                if not msg or emotion not in VALID_EMOTIONS:
+                    skipped_5k += 1
+                    continue
+                try:
+                    conf = float(row.get("confidence", 1.0))
+                except (ValueError, TypeError):
+                    conf = 1.0
+                if conf < MIN_CONFIDENCE:
+                    low_conf_5k += 1
+                    continue
+                msgs_5k.append(msg)
+                ids_5k.append(LABEL2ID[emotion])
+        print(f"  Loaded {len(msgs_5k)} rows from local file "
+              f"({skipped_5k} invalid, {low_conf_5k} below confidence {MIN_CONFIDENCE})")
+        from collections import Counter as _Counter
+        dist_5k = _Counter(LABELS[i] for i in ids_5k)
+        for label, count in sorted(dist_5k.items()):
+            pct = 100 * count / max(len(ids_5k), 1)
+            print(f"    {label:<14} {count:>4}  ({pct:.1f}%)")
+    else:
+        msgs_5k, ids_5k = load_openreview(OPENREVIEW_5K_CSV, min_confidence=MIN_CONFIDENCE)
+
+    # Combine: human-labeled first (higher quality), then auto-labeled
+    messages  = msgs_2k + msgs_5k
+    label_ids = ids_2k  + ids_5k
+    print(f"\n  Combined: {len(messages)} total samples "
+          f"({len(msgs_2k)} human + {len(msgs_5k)} auto-labeled)")
 
     train_msgs, val_msgs, train_labels, val_labels = train_test_split(
         messages, label_ids,
@@ -201,7 +278,7 @@ def train():
     )
 
     # ── Training ──────────────────────────────────────────────────────────────
-    print(f"\n[4/4] Fine-tuning for {NUM_EPOCHS} epochs...")
+    print(f"\n[4/4] Fine-tuning for {NUM_EPOCHS} epochs on {len(train_msgs)} samples...")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     def compute_metrics(eval_pred):
@@ -293,8 +370,9 @@ def train():
 
     print("\n" + "=" * 60)
     print("  Training complete.")
+    print(f"  Dataset    : {len(messages)} samples ({len(msgs_2k)} human + {len(msgs_5k)} auto)")
     print(f"  Model saved → {OUTPUT_DIR}")
-    print("  Next:  python scripts/train_risk_model.py")
+    print("  Next:  uv run python scripts/train_risk_model.py")
     print("  Then:  python gomi.py <repo_path>")
     print("=" * 60)
 
