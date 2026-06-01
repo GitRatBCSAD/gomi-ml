@@ -52,3 +52,11 @@ Place env vars in a `.env` at the repo root — scripts auto-load it via `python
 ### Inference workflow (pull on startup)
 - `gomi.py` pulls JIT/OpenReview datasets from the HF dataset repo; sentiment and risk **models** load from `scripts/datasets/` after training, or from HF model repos when `GOMI_*_MODEL_REPO` is set.
 
+### Stable release tagging
+
+For tagging a release, run this script:
+
+```sh
+ uv run python scripts/tag_release.py v2.0.0
+```
+
