@@ -9,6 +9,7 @@ def _hub_paths_for_filename(filename: str) -> list[str]:
         "cleaned20k.csv",
         "openreview_labeled_2k.csv",
         "openreview_labeled_5k_auto.csv",
+        "senticr_labeled.csv",
     } or filename.startswith("openreview_"):
         paths.append(f"openreview/{filename}")
     if (
@@ -34,10 +35,21 @@ def hub_download_dataset_file(
     revision: str | None = None,
     token: str | None = None,
 ) -> str | None:
+    import os
+    
+    # 1. Check locally first for people training locally
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    datasets_dir = os.path.join(script_dir, "datasets")
+    
+    paths = _hub_paths_for_filename(filename)
+    for path in paths:
+        local_path = os.path.join(datasets_dir, path)
+        if os.path.exists(local_path):
+            return local_path
+            
+    # 2. Fall back to Hugging Face
     from huggingface_hub import hf_hub_download
     from huggingface_hub.utils import EntryNotFoundError, RevisionNotFoundError
-
-    paths = _hub_paths_for_filename(filename)
 
     def _try_download(rev: str | None) -> str | None:
         revision_error: RevisionNotFoundError | None = None
