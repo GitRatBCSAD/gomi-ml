@@ -66,3 +66,5 @@ poetry.lock
 
 scripts/datasets/
 datasets/
+.antigravitycli/
+CLAUDE.md
