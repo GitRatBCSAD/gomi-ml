@@ -2,6 +2,8 @@ scripts/datasets/distilbert_sentiment
 scripts/datasets/risk_model.joblib
 scripts/datasets/risk_model_shap_background.npy
 
+.direnv/
+
 uv.lock
 # Byte-compiled / cache
 __pycache__/
