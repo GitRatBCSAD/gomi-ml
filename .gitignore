@@ -64,7 +64,7 @@ poetry.lock
 # PyInstaller
 *.spec
 
-scripts/datasets/
-datasets/
+dataset/
 .antigravitycli/
 CLAUDE.md
+.train_test/
