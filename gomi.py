@@ -33,7 +33,7 @@ from dotenv import load_dotenv
 from huggingface_hub import hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError
 from sklearn.linear_model import LogisticRegression
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline as hf_pipeline
+from transformers import AutoTokenizer, DistilBertForSequenceClassification, DistilBertTokenizerFast, pipeline as hf_pipeline
 
 # ─── PATHS ────────────────────────────────────────────────────────────────────
 
@@ -90,10 +90,22 @@ SKIP_DIRS = {
     "node_modules", ".git", "vendor", "__pycache__",
     ".venv", "venv", "dist", "build", ".next", "android"
 }
+# Filename patterns that indicate generated/bundled/minified files
+# These are skipped because their commit history reflects tooling, not authorship.
+SKIP_FILE_PATTERNS = {
+    "main.js",        # bundled GitHub Actions / webpack entry points
+    "bundle.js",
+    "vendor.js",
+    "polyfills.js",
+    "runtime.js",
+}
+SKIP_FILE_SUFFIXES = (".min.js", ".min.css", "-min.js", ".bundle.js")
 
-# Labels produced by the fine-tuned DistilBERT model
-VALID_LABELS   = {"frustration", "caution", "neutral", "satisfaction"}
-RISK_LABELS    = {"frustration", "caution"}
+# Labels produced by the fine-tuned DistilBERT model.
+# The uploaded checkpoint uses 3 merged labels: risk | neutral | satisfaction
+# (frustration + caution were collapsed into 'risk' during fine-tuning).
+VALID_LABELS = {"risk", "frustration", "caution", "neutral", "satisfaction"}
+RISK_LABELS  = {"risk", "frustration", "caution"}
 
 # Runtime analysis window: 6 months (as specified in thesis)
 ANALYSIS_WINDOW_DAYS = 182
@@ -192,8 +204,11 @@ def load_sentiment_model():
             sys.exit(1)
 
     token = _get_hf_token()
-    tokenizer = AutoTokenizer.from_pretrained(model_source, revision=revision, token=token, force_download=True if HF_SENTIMENT_MODEL_REPO else False)
-    model = AutoModelForSequenceClassification.from_pretrained(model_source, revision=revision, token=token, force_download=True if HF_SENTIMENT_MODEL_REPO else False)
+    # Use DistilBertTokenizerFast directly — AutoTokenizer requires model_type in
+    # config.json to auto-resolve the class, but the saved checkpoint omits it.
+    tokenizer = DistilBertTokenizerFast.from_pretrained(model_source, revision=revision, token=token, force_download=True if HF_SENTIMENT_MODEL_REPO else False)
+    # Use DistilBertForSequenceClassification directly — same reason as tokenizer above.
+    model = DistilBertForSequenceClassification.from_pretrained(model_source, revision=revision, token=token, force_download=True if HF_SENTIMENT_MODEL_REPO else False)
     classifier = hf_pipeline(
         "text-classification",
         model=model,
@@ -207,30 +222,82 @@ def load_sentiment_model():
     return classifier
 
 
+_SENTIMENT_CACHE = {}
+
+
+def preclassify_messages(messages: list[str], classifier, batch_size: int = 64) -> dict[str, str]:
+    """
+    Pre-classifies a list of unique commit messages in batches for speed.
+    Returns a mapping of stripped_message -> label.
+    """
+    if not messages:
+        return {}
+
+    # Strip prefixes and filter empty ones
+    stripped_to_orig = {}
+    for msg in messages:
+        stripped = strip_prefix(msg)
+        if stripped:
+            stripped_to_orig[stripped] = msg
+
+    stripped_list = list(stripped_to_orig.keys())
+    if not stripped_list:
+        return {}
+
+    print(f"  Pre-classifying {len(stripped_list)} unique commit messages in batches of {batch_size}...")
+    
+    # Process through pipeline in batches
+    inputs = [s[:512] for s in stripped_list]
+    
+    # Run pipeline (hf_pipeline text-classification supports list of inputs)
+    results = classifier(inputs, batch_size=batch_size)
+    
+    mapping = {}
+    for stripped, res in zip(stripped_list, results):
+        best = max(res, key=lambda x: x["score"])
+        label = best["label"].lower()
+        label = label.replace("label_", "")
+        # Normalize: LABEL_0 / 'risk' variants all map to 'risk'
+        if label not in VALID_LABELS:
+            for known in VALID_LABELS:
+                if known in label:
+                    label = known
+                    break
+            else:
+                label = "neutral"
+        mapping[stripped] = label
+
+    return mapping
+
+
 def classify_message(message: str, classifier) -> str:
     """
     Classifies a single commit message using the fine-tuned DistilBERT model.
 
     Prefixes are stripped before classification for consistency with training.
+    Uses _SENTIMENT_CACHE to avoid redundant classification.
     """
     stripped = strip_prefix(message)
     if not stripped:
         return "neutral"
 
-    # pipeline returns list of lists when top_k=None: [[{label, score}, ...]]
-    results = classifier(stripped[:512])[0]  # truncate safety; model also truncates
+    if stripped in _SENTIMENT_CACHE:
+        return _SENTIMENT_CACHE[stripped]
+
+    # fallback to single item classification if cache miss
+    results = classifier(stripped[:512])[0]
     best = max(results, key=lambda x: x["score"])
     label = best["label"].lower()
-
-    # Normalize label to expected scheme in case model saved with capitalized labels
-    label = label.replace("label_", "")  # handle HF auto-labeling e.g. "LABEL_0"
+    label = label.replace("label_", "")
     if label not in VALID_LABELS:
-        # Fall back: pick closest known label by string match
         for known in VALID_LABELS:
             if known in label:
-                return known
-        return "neutral"
+                label = known
+                break
+        else:
+            label = "neutral"
 
+    _SENTIMENT_CACHE[stripped] = label
     return label
 
 
@@ -598,9 +665,23 @@ def load_risk_model() -> tuple:
         revision = HF_RISK_MODEL_REVISION
         source_desc = HF_RISK_MODEL_REPO if not revision else f"{HF_RISK_MODEL_REPO}@{revision}"
     print(f"  Loaded risk model from: {source_desc}")
-    print(f"  LR coef → sentiment: {model.coef_[0][0]:.4f}  "
-          f"complexity: {model.coef_[0][1]:.4f}  "
-          f"low_info: {model.coef_[0][2]:.4f}")
+    if len(model.coef_[0]) == 7:
+        FEATURE_NAMES = [
+            'sentiment_score',
+            'change_entropy',
+            'ndev_score',
+            'age_score',
+            'complexity_score',
+            'low_info_ratio',
+            'n_commits'
+        ]
+        print("  LR coefficients:")
+        for name, coef in zip(FEATURE_NAMES, model.coef_[0]):
+            print(f"    {name:<22} {coef:+.4f}")
+    else:
+        print(f"  LR coef → sentiment: {model.coef_[0][0]:.4f}  "
+              f"complexity: {model.coef_[0][1]:.4f}  "
+              f"low_info: {model.coef_[0][2]:.4f}")
     print(f"  Intercept: {model.intercept_[0]:.4f}")
     print(f"  SHAP background: {len(X_train)} training samples")
 
@@ -614,9 +695,6 @@ def compute_shap(model, X_train: np.ndarray, X_file: np.ndarray) -> dict:
     Decomposes the Risk Score into per-feature contributions using SHAP.
 
     Uses LinearExplainer with X_train as the background distribution.
-    For a three-feature LR model this is equivalent to:
-      risk ≈ base_rate + sentiment_contrib + complexity_contrib + low_info_contrib
-
     Returns contributions for the buggy class (class index 1).
     """
     explainer = shap.LinearExplainer(model, X_train)
@@ -638,12 +716,24 @@ def compute_shap(model, X_train: np.ndarray, X_file: np.ndarray) -> dict:
             else explainer.expected_value[0]
         )
 
-    return {
-        "base_rate":          float(base),
-        "sentiment_contrib":  float(sv[0]),
-        "complexity_contrib": float(sv[1]),
-        "low_info_contrib":   float(sv[2]),
-    }
+    if len(sv) == 7:
+        return {
+            "base_rate":          float(base),
+            "sentiment_contrib":  float(sv[0]),
+            "entropy_contrib":    float(sv[1]),
+            "ndev_contrib":       float(sv[2]),
+            "age_contrib":        float(sv[3]),
+            "complexity_contrib": float(sv[4]),
+            "low_info_contrib":   float(sv[5]),
+            "commits_contrib":    float(sv[6]),
+        }
+    else:
+        return {
+            "base_rate":          float(base),
+            "sentiment_contrib":  float(sv[0]),
+            "complexity_contrib": float(sv[1]),
+            "low_info_contrib":   float(sv[2]),
+        }
 
 
 
@@ -730,6 +820,7 @@ def get_repo_git_stats(repo_path: str) -> dict:
         if total_churn > 0:
             probs = [(c["la"] + c["ld"]) / total_churn for c in changes]
             ent   = -sum(p * math.log2(p) for p in probs if p > 0)
+            ent   = max(0.0, ent)   # clamp -0.0 float artifact
         else:
             ent = 0.0
         seen: set[str] = set()
@@ -751,8 +842,13 @@ def get_source_files(repo_path: str) -> list[str]:
     for root, dirs, filenames in os.walk(repo_path):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for fn in filenames:
-            if any(fn.endswith(ext) for ext in SOURCE_EXTENSIONS):
-                files.append(os.path.join(root, fn))
+            if not any(fn.endswith(ext) for ext in SOURCE_EXTENSIONS):
+                continue
+            if fn in SKIP_FILE_PATTERNS:
+                continue
+            if any(fn.endswith(sfx) for sfx in SKIP_FILE_SUFFIXES):
+                continue
+            files.append(os.path.join(root, fn))
     return files
 
 
@@ -788,6 +884,14 @@ def run_gomi(repo_path: str, top_n: int = 10) -> None:
     git_stats = get_repo_git_stats(repo_path)
     print(f"  Git history covers {len(git_stats)} tracked files in window")
 
+    # Batch pre-classify all unique commit messages to save inference time
+    all_msgs = []
+    for stats in git_stats.values():
+        all_msgs.extend(stats.get("messages", []))
+    unique_msgs = list(set(all_msgs))
+    global _SENTIMENT_CACHE
+    _SENTIMENT_CACHE = preclassify_messages(unique_msgs, sentiment_clf, batch_size=64)
+
     # ── Layer 2: Lizard complexity on all source files ─────────────────────────
     print("\n[4/5] Scanning source files with Lizard...")
     source_files = get_source_files(repo_path)
@@ -801,8 +905,12 @@ def run_gomi(repo_path: str, top_n: int = 10) -> None:
         rel = os.path.relpath(fp, repo_path)
         raw_complexity[rel] = compute_complexity(fp)
 
-    # Repo-relative normalization: AvgCCN percentile rank within this repo
-    all_ccn = [m["AvgCCN"] for m in raw_complexity.values()]
+    # Repo-relative normalization: percentile ranks within this repo
+    all_ccn  = [m["AvgCCN"]  for m in raw_complexity.values()]
+    all_ndev = [git_stats.get(os.path.relpath(fp, repo_path), {}).get("ndev", 0)
+                for fp in source_files]
+    all_age  = [git_stats.get(os.path.relpath(fp, repo_path), {}).get("age_days", 0.0)
+                for fp in source_files]
 
     # ── Score every file ──────────────────────────────────────────────────────
     print("\n[5/5] Computing risk scores...")
@@ -824,19 +932,24 @@ def run_gomi(repo_path: str, top_n: int = 10) -> None:
         complexity_score = percentile_rank(raw_complexity[rel]["AvgCCN"], all_ccn)
 
         # Layer 3: Logistic Regression risk score
-        X_file_raw = np.array([[sentiment_score, complexity_score, low_info_ratio]])
+        # Feature vector must match training order exactly (gomi_train_3.ipynb Cell 18):
+        # [sentiment_score, change_entropy, ndev_score, age_score,
+        #  complexity_score, low_info_ratio, n_commits]
+        change_entropy = stats.get("ent", 0.0)
+        ndev_score     = percentile_rank(stats.get("ndev", 0), all_ndev)
+        age_score      = percentile_rank(stats.get("age_days", 0.0), all_age)
+        n_commits      = float(nf)
+        X_file_raw = np.array([[
+            sentiment_score,
+            change_entropy,
+            ndev_score,
+            age_score,
+            complexity_score,
+            low_info_ratio,
+            n_commits,
+        ]])
         X_file_scaled = scaler.transform(X_file_raw)
         risk_score = float(risk_model.predict_proba(X_file_scaled)[0][1])
-        # Layer 4: SHAP breakdown
-        try:
-            shap_out = compute_shap(risk_model, X_train, X_file_scaled)
-        except Exception:
-            shap_out = {
-                "base_rate": 0.0,
-                "sentiment_contrib": 0.0,
-                "complexity_contrib": 0.0,
-                "low_info_contrib": 0.0,
-            }
 
         results.append({
             "file":              rel,
@@ -844,14 +957,45 @@ def run_gomi(repo_path: str, top_n: int = 10) -> None:
             "complexity_score":  complexity_score,
             "low_info_ratio":    low_info_ratio,
             "risk_score":        risk_score,
-            "shap":              shap_out,
+            "X_file_scaled":     X_file_scaled,
+            "shap":              None,
             "commits":           breakdown,
             "complexity_raw":    raw_complexity[rel],
             "git_stats":         stats,
             "low_confidence":    low_confidence,
         })
 
-    results.sort(key=lambda x: x["risk_score"], reverse=True)
+    # High-confidence first (nf >= MIN_COMMITS_FOR_SCORE), then low-confidence.
+    # Within each tier, sort by risk_score descending.
+    results.sort(key=lambda x: (x["low_confidence"], -x["risk_score"]))
+
+    hi_conf  = [r for r in results if not r["low_confidence"]]
+    lo_conf  = [r for r in results if r["low_confidence"]]
+
+    # ── Compute SHAP only for the top 5 high-confidence files (drilldown) ─────
+    drilldown_pool = (hi_conf[:5] if len(hi_conf) >= 5 else hi_conf + lo_conf[:5 - len(hi_conf)])
+    for r in drilldown_pool:
+        try:
+            r["shap"] = compute_shap(risk_model, X_train, r["X_file_scaled"])
+        except Exception:
+            if X_train.shape[1] == 7:
+                r["shap"] = {
+                    "base_rate": 0.0,
+                    "sentiment_contrib": 0.0,
+                    "entropy_contrib": 0.0,
+                    "ndev_contrib": 0.0,
+                    "age_contrib": 0.0,
+                    "complexity_contrib": 0.0,
+                    "low_info_contrib": 0.0,
+                    "commits_contrib": 0.0,
+                }
+            else:
+                r["shap"] = {
+                    "base_rate": 0.0,
+                    "sentiment_contrib": 0.0,
+                    "complexity_contrib": 0.0,
+                    "low_info_contrib": 0.0,
+                }
 
     # ─── OUTPUT ───────────────────────────────────────────────────────────────
 
@@ -860,11 +1004,7 @@ def run_gomi(repo_path: str, top_n: int = 10) -> None:
     def line(text: str) -> None:
         print(f"│ {text:<{W - 2}} │")
 
-    print("\n" + "=" * W)
-    print(f"  RESULTS — {len(results)} files scored (showing top {min(top_n, len(results))})")
-    print("=" * W)
-
-    for r in results[:top_n]:
+    def print_result_row(r):
         score  = r["risk_score"]
         filled = int(score * 10)
         bar    = "█" * filled + "░" * (10 - filled)
@@ -876,33 +1016,78 @@ def run_gomi(repo_path: str, top_n: int = 10) -> None:
         flag = "  ⚑ low confidence" if r["low_confidence"] else ""
         print(f"\n  {r['file']:<40} [{bar}] {score:.2f}  {level}{flag}")
 
-    if len(results) > top_n:
-        print(f"\n  ... and {len(results) - top_n} more files (not shown)")
-
+    # ── High-confidence results ────────────────────────────────────────────────
     print("\n" + "=" * W)
-    print("  DRILLDOWN — top 5 riskiest files")
+    print(f"  RESULTS — {len(results)} files scored")
+    print(f"  High-confidence (≥{MIN_COMMITS_FOR_SCORE} commits): {len(hi_conf)} files")
     print("=" * W)
 
-    for r in results[:5]:
+    show_hi = hi_conf[:top_n]
+    if show_hi:
+        for r in show_hi:
+            print_result_row(r)
+        if len(hi_conf) > top_n:
+            print(f"\n  ... and {len(hi_conf) - top_n} more high-confidence files (not shown)")
+    else:
+        print("\n  (no files with ≥10 commits in the analysis window)")
+
+    # ── Low-confidence summary ─────────────────────────────────────────────────
+    if lo_conf:
+        print(f"\n  ── Low-confidence (< {MIN_COMMITS_FOR_SCORE} commits): {len(lo_conf)} files ──")
+        for r in lo_conf[:5]:
+            print_result_row(r)
+        if len(lo_conf) > 5:
+            print(f"  ... and {len(lo_conf) - 5} more low-confidence files (not shown)")
+
+    print("\n" + "=" * W)
+    drilldown_label = "top 5 high-confidence" if len(hi_conf) >= 5 else "top 5 by confidence then risk"
+    print(f"  DRILLDOWN — {drilldown_label} files")
+    print("=" * W)
+
+    for r in drilldown_pool[:5]:
         print(f"\n┌{'─' * W}┐")
         line(f"FILE: {r['file']}")
         conf = "  ⚑ LOW CONFIDENCE (< 10 commits)" if r["low_confidence"] else ""
         line(f"Risk score: {r['risk_score']:.4f}{conf}")
 
         print(f"├{'─' * W}┤")
-        shap_d = r["shap"]
-        approx = (shap_d["base_rate"] + shap_d["sentiment_contrib"] + 
-                  shap_d["complexity_contrib"] + shap_d["low_info_contrib"])
-        line("SHAP breakdown:")
-        line(f"  base_rate          {shap_d['base_rate']:+.4f}")
-        line(f"  sentiment_contrib  {shap_d['sentiment_contrib']:+.4f}"
-             f"   (sentiment_score = {r['sentiment_score']:.3f})")
-        line(f"  complexity_contrib {shap_d['complexity_contrib']:+.4f}"
-             f"   (complexity_score = {r['complexity_score']:.3f})")
-        line(f"  low_info_contrib   {shap_d['low_info_contrib']:+.4f}"
-             f"   (low_info_ratio = {r['low_info_ratio']:.3f})")
-        line(f"  {'─' * 28}")
-        line(f"  ≈ risk score       {approx:+.4f}")
+        shap_d = r["shap"] or {}
+        if "entropy_contrib" in shap_d:
+            approx = (shap_d["base_rate"] + shap_d["sentiment_contrib"] + 
+                      shap_d["entropy_contrib"] + shap_d["ndev_contrib"] +
+                      shap_d["age_contrib"] + shap_d["complexity_contrib"] +
+                      shap_d["low_info_contrib"] + shap_d["commits_contrib"])
+            line("SHAP breakdown:")
+            line(f"  base_rate          {shap_d['base_rate']:+.4f}")
+            line(f"  sentiment_contrib  {shap_d['sentiment_contrib']:+.4f}"
+                 f"   (sentiment_score = {r['sentiment_score']:.3f})")
+            line(f"  entropy_contrib    {shap_d['entropy_contrib']:+.4f}"
+                 f"   (change_entropy = {r['git_stats'].get('ent', 0.0):.3f})")
+            line(f"  ndev_contrib       {shap_d['ndev_contrib']:+.4f}"
+                 f"   (ndev_score = {percentile_rank(r['git_stats'].get('ndev', 0), all_ndev):.3f})")
+            line(f"  age_contrib        {shap_d['age_contrib']:+.4f}"
+                 f"   (age_score = {percentile_rank(r['git_stats'].get('age_days', 0.0), all_age):.3f})")
+            line(f"  complexity_contrib {shap_d['complexity_contrib']:+.4f}"
+                 f"   (complexity_score = {r['complexity_score']:.3f})")
+            line(f"  low_info_contrib   {shap_d['low_info_contrib']:+.4f}"
+                 f"   (low_info_ratio = {r['low_info_ratio']:.3f})")
+            line(f"  commits_contrib    {shap_d['commits_contrib']:+.4f}"
+                 f"   (n_commits = {float(r['git_stats'].get('nf', 0)):.1f})")
+            line(f"  {'─' * 28}")
+            line(f"  ≈ risk score       {approx:+.4f}")
+        else:
+            approx = (shap_d["base_rate"] + shap_d["sentiment_contrib"] + 
+                      shap_d["complexity_contrib"] + shap_d["low_info_contrib"])
+            line("SHAP breakdown:")
+            line(f"  base_rate          {shap_d['base_rate']:+.4f}")
+            line(f"  sentiment_contrib  {shap_d['sentiment_contrib']:+.4f}"
+                 f"   (sentiment_score = {r['sentiment_score']:.3f})")
+            line(f"  complexity_contrib {shap_d['complexity_contrib']:+.4f}"
+                 f"   (complexity_score = {r['complexity_score']:.3f})")
+            line(f"  low_info_contrib   {shap_d['low_info_contrib']:+.4f}"
+                 f"   (low_info_ratio = {r['low_info_ratio']:.3f})")
+            line(f"  {'─' * 28}")
+            line(f"  ≈ risk score       {approx:+.4f}")
 
         print(f"├{'─' * W}┤")
         cr = r["complexity_raw"]
@@ -927,9 +1112,10 @@ def run_gomi(repo_path: str, top_n: int = 10) -> None:
         print(f"├{'─' * W}┤")
         line("Commit sentiment (DistilBERT):")
         if r["commits"]:
-            for msg, emotion in r["commits"][:4]:
+            for msg, emotion in r["commits"][:6]:
                 short = (msg[:43] + "...") if len(msg) > 46 else msg
-                line(f"  [{emotion:<12}] {short}")
+                tag = f"{emotion} ⚠" if emotion in RISK_LABELS else (f"{emotion} ~" if emotion == "low_info" else emotion)
+                line(f"  [{tag:<14}] {short}")
         else:
             line("  (no commit messages in 6-month window)")
 
