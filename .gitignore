@@ -70,3 +70,5 @@ dataset/
 .antigravitycli/
 CLAUDE.md
 .train_test/
+
+.direnv
