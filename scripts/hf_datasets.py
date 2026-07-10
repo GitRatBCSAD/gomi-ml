@@ -10,14 +10,22 @@ def _hub_paths_for_filename(filename: str) -> list[str]:
         "openreview_labeled_2k.csv",
         "openreview_labeled_5k_auto.csv",
         "senticr_labeled.csv",
-    } or filename.startswith("openreview_"):
-        paths.append(f"openreview/{filename}")
-    if (
+        "StackOverflow.csv",
+        "github.csv",
+    } or filename.startswith("openreview_") or filename.startswith("kaggle_100k_labeled_"):
+        paths.append(f"sentiment/{filename}")
+    elif filename.startswith("apachejit") or "apache" in filename:
+        paths.append(f"jit/apachejit/{filename}")
+    elif (
         filename.endswith("_test_raw.pkl")
         or filename.endswith("_k_feature.csv")
-        or filename.startswith("apachejit")
+        or "deepjit" in filename
+        or filename == "qt_dict.pkl"
+        or filename == "commit_files_deepjit.csv"
     ):
-        paths.append(f"jit/{filename}")
+        paths.append(f"jit/deepjit/{filename}")
+    elif filename.startswith("unlabeled_") or filename in {"oneline.csv", "full.csv"}:
+        paths.append(f"unlabeled/{filename}")
     paths.append(filename)
     seen: set[str] = set()
     ordered: list[str] = []

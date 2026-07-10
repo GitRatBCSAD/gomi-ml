@@ -82,7 +82,7 @@ def _download_dataset_csv(filename: str) -> str | None:
     try:
         return hf_hub_download(
             repo_id=HF_DATASET_REPO, 
-            filename=f"openreview/{filename}", 
+            filename=f"sentiment/{filename}", 
             repo_type="dataset", 
             revision=HF_DATASET_REVISION,
             token=_get_hf_token()

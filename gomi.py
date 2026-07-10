@@ -128,14 +128,27 @@ def _get_hf_token():
 
 
 def _dataset_subdir_for_filename(filename: str) -> str | None:
-    if filename in {"cleaned20k.csv", "openreview_labeled_2k.csv", "openreview_labeled_5k_auto.csv"}:
-        return "openreview"
-    if filename.startswith("openreview_"):
-        return "openreview"
-    if filename == "apachejit_commits.csv":
-        return "jit"
-    if filename.endswith("_test_raw.pkl") or filename.endswith("_k_feature.csv"):
-        return "jit"
+    if filename in {
+        "cleaned20k.csv",
+        "openreview_labeled_2k.csv",
+        "openreview_labeled_5k_auto.csv",
+        "senticr_labeled.csv",
+        "StackOverflow.csv",
+        "github.csv",
+    } or filename.startswith("openreview_") or filename.startswith("kaggle_100k_labeled_"):
+        return "sentiment"
+    if filename.startswith("apachejit") or "apache" in filename:
+        return "jit/apachejit"
+    if (
+        filename.endswith("_test_raw.pkl")
+        or filename.endswith("_k_feature.csv")
+        or "deepjit" in filename
+        or filename == "qt_dict.pkl"
+        or filename == "commit_files_deepjit.csv"
+    ):
+        return "jit/deepjit"
+    if filename.startswith("unlabeled_") or filename in {"oneline.csv", "full.csv"}:
+        return "unlabeled"
     return None
 
 
