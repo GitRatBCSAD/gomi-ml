@@ -56,8 +56,8 @@ CLONE_DIR   = DATASET_DIR / ".clones" / "apache"
 HF_DATASET_REPO = "GitRatBCSAD/gomi-datasets"
 
 INPUT_FILES = {
-    "train": "jit/apachejit_train_with_messages.csv",
-    "test":  "jit/apachejit_test_small.csv",
+    "train": "jit/apachejit/apachejit_train_with_messages.csv",
+    "test":  "jit/apachejit/apachejit_test_small.csv",
 }
 OUTPUT_FILES = {
     "train": DATASET_DIR / "apachejit_train_lizard.csv",

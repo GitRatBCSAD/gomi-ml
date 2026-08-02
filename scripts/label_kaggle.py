@@ -12,7 +12,7 @@ def main():
     
     # 1. Paths
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    input_file = os.path.join(script_dir, "..", "..", "gomi-datasets", "kraggleghcommit-raw-nonlabeled", "chunks", "unlabeled_kaggle_100k_chunk_1.csv")
+    input_file = os.path.join(script_dir, "..", "..", "gomi-datasets", "unlabeled", "chunks", "unlabeled_kaggle_100k_chunk_1.csv")
     output_file = os.path.join(script_dir, "datasets", "kaggle_100k_labeled_1.csv")
     
     if not os.path.isfile(input_file):

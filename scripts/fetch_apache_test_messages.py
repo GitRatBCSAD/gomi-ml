@@ -41,7 +41,7 @@ DATASET_DIR = SCRIPT_DIR.parent / "datasets"
 CLONE_DIR   = DATASET_DIR / ".clones"
 
 HF_DATASET_REPO = "GitRatBCSAD/gomi-datasets"
-HF_INPUT_PATH   = "jit/apachejit_test_small.csv"
+HF_INPUT_PATH   = "jit/apachejit/apachejit_test_small.csv"
 
 INPUT_CSV  = DATASET_DIR / "apachejit_test_small.csv"
 OUTPUT_CSV = DATASET_DIR / "apachejit_test_with_messages.csv"
@@ -224,7 +224,7 @@ def main():
     print(f"\nWrote {len(results)} rows → {OUTPUT_CSV}")
     print("\nNext steps:")
     print("  1. Upload datasets/apachejit_test_with_messages.csv to HF:")
-    print(f"     huggingface-cli upload {HF_DATASET_REPO} {OUTPUT_CSV} jit/apachejit_test_with_messages.csv --repo-type dataset")
+    print(f"     huggingface-cli upload {HF_DATASET_REPO} {OUTPUT_CSV} jit/apachejit/apachejit_test_with_messages.csv --repo-type dataset")
     print("  2. Re-run the notebook — cell 15 will auto-detect the new file.")
 
 
