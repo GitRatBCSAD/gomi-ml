@@ -6,7 +6,7 @@ For each commit in the training/validation datasets, runs:
     git diff-tree --no-commit-id -r --name-only --diff-filter=AM <hash>
 
 Output files (upload all three to HuggingFace jit/ folder after running):
-    dataset/commit_files_deepjit.csv         commit_hash, project, file_path, date
+    gomi-datasets/jit/deepjit/deepjit_files.csv   commit_hash, project, file_path, date
     dataset/commit_files_apache_train.csv    commit_hash, project, file_path, date
     dataset/commit_files_apache_test.csv     commit_hash, project, file_path, date
 
@@ -19,7 +19,6 @@ Usage:
 """
 
 import csv
-import pickle
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -38,6 +37,7 @@ except ImportError:
 SCRIPT_DIR  = Path(__file__).parent
 DATASET_DIR = SCRIPT_DIR.parent / "dataset"
 CLONE_BASE  = DATASET_DIR / ".clones"
+DEEPJIT_DIR = SCRIPT_DIR.resolve().parents[1] / "gomi-datasets" / "jit" / "deepjit"
 
 OUTPUT_FIELDS = ["commit_hash", "project", "file_path", "date"]
 
@@ -133,28 +133,20 @@ def load_deepjit_work() -> list:
             print(f"  [skip] {proj}: not found at {proj_dir}")
             continue
 
-        pkl_path = DATASET_DIR / "deepjit" / proj / "deepjit" / f"{proj}_test_raw.pkl"
-        if not pkl_path.exists():
-            print(f"  [skip] {proj}: PKL not found at {pkl_path}")
+        csv_path = DEEPJIT_DIR / f"deepjit_{proj}_commits.csv"
+        if not csv_path.exists():
+            print(f"  [skip] {proj}: commits CSV not found at {csv_path}")
             continue
 
-        with open(pkl_path, "rb") as f:
-            raw = pickle.load(f)
-        hashes = raw[0]
-
-        # Dates from k_feature CSV
-        date_map = {}
-        feat_csv = DATASET_DIR / "deepjit" / proj / f"{proj}_k_feature.csv"
-        if feat_csv.exists():
-            with open(feat_csv, newline="", encoding="utf-8") as f:
-                for row in csv.DictReader(f):
-                    h = row.get("_id", "").strip()
-                    d = row.get("date", "").strip()
-                    if h and d:
-                        try:
-                            date_map[h] = int(float(d))
-                        except ValueError:
-                            pass
+        hashes, date_map = [], {}
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                h = row["commit_hash"].strip()
+                hashes.append(h)
+                try:
+                    date_map[h] = int(float(row["author_date_unix_timestamp"]))
+                except (ValueError, KeyError):
+                    pass
 
         # Index hashes across all subrepos
         print(f"  {proj}: indexing {len(hashes)} hashes across subrepos...")
@@ -288,7 +280,7 @@ def main():
         print("DeepJIT")
         print("=" * 60)
         work = load_deepjit_work()
-        run_and_write(work, DATASET_DIR / "commit_files_deepjit.csv", "deepjit", workers)
+        run_and_write(work, DEEPJIT_DIR / "deepjit_files.csv", "deepjit", workers)
 
     if run_train:
         print("\n" + "=" * 60)
@@ -306,7 +298,10 @@ def main():
 
     print("\n" + "=" * 60)
     print("Done. Upload to HuggingFace:")
-    for name in ["commit_files_deepjit", "commit_files_apache_train", "commit_files_apache_test"]:
+    p = DEEPJIT_DIR / "deepjit_files.csv"
+    if p.exists():
+        print(f"  huggingface-cli upload GitRatBCSAD/gomi-datasets {p} jit/deepjit/deepjit_files.csv --repo-type dataset")
+    for name in ["commit_files_apache_train", "commit_files_apache_test"]:
         p = DATASET_DIR / f"{name}.csv"
         if p.exists():
             print(f"  huggingface-cli upload GitRatBCSAD/gomi-datasets {p} jit/{name}.csv --repo-type dataset")

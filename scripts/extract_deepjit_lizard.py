@@ -12,8 +12,9 @@ For each commit:
 Each DeepJIT project spans MULTIPLE repos (from ISSTA21-JIT-DP/Data_Extraction/git_base/git_datasets/).
 "platform" = Eclipse Platform (NOT Android).
 
-Output: dataset/deepjit_{project}_lizard.csv
-Columns: commit_id, message, avg_ccn, avg_nloc, func_count, avg_params, file_count, buggy
+Input:  gomi-datasets/jit/deepjit/deepjit_{project}_commits.csv (FULL population)
+Output: gomi-datasets/jit/deepjit/deepjit_{project}_lizard.csv
+Columns: commit_hash, message, avg_ccn, avg_nloc, func_count, avg_params, file_count, buggy
 
 Usage:
     python scripts/extract_deepjit_lizard.py              # full run, all projects
@@ -25,8 +26,6 @@ Repos cloned bare with --filter=blob:none (small initial clone, blobs fetched la
 """
 
 import csv
-import os
-import pickle
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -52,6 +51,8 @@ except ImportError:
 # ── Paths ──────────────────────────────────────────────────────────────────────
 DATASET_DIR = Path(__file__).parent.parent / "dataset"
 CLONE_DIR   = DATASET_DIR / ".clones"
+# gomi/gomi-ml/scripts/<this file> -> gomi/gomi-datasets/jit/deepjit
+DEEPJIT_DIR = Path(__file__).resolve().parents[2] / "gomi-datasets" / "jit" / "deepjit"
 
 # ── Repo URLs (from ISSTA21-JIT-DP/Data_Extraction/git_base/git_datasets/) ────
 REPO_MAP = {
@@ -143,14 +144,7 @@ REPO_MAP = {
     ],
 }
 
-DEEPJIT_PKLS = {
-    "qt":        "qt_test_raw.pkl",
-    "openstack": "openstack_test_raw.pkl",
-    "go":        "go_test_raw.pkl",
-    "jdt":       "jdt_test_raw.pkl",
-    "gerrit":    "gerrit_test_raw.pkl",
-    "platform":  "platform_test_raw.pkl",
-}
+DEEPJIT_PROJECTS = ["qt", "openstack", "go", "jdt", "gerrit", "platform"]
 
 CODE_EXTENSIONS = {
     ".py", ".java", ".go", ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp",
@@ -266,8 +260,6 @@ def build_hash_index(project: str, repos: list, hashes: list) -> dict:
 
 def verify_coverage(project: str, repos: list, hashes: list, n: int = 100):
     sample = hashes[:n]
-    index, _ = build_hash_index.__wrapped__(project, repos, sample) if hasattr(build_hash_index, "__wrapped__") else ({}, None)
-    # Just reuse build_hash_index on the sample
     idx = build_hash_index(project, repos, sample)
     found = len(idx)
     print(f"  [{project}] sample coverage: {found}/{n} ({found/n*100:.0f}%)")
@@ -345,7 +337,7 @@ def run_lizard(filepath: str, source: str):
 def process_one_commit(args):
     """Worker function for ThreadPoolExecutor. Returns (index, row_dict, status)."""
     idx, h, label, msg, hash_index = args
-    base  = {"commit_id": h, "message": (msg or "").strip(), "buggy": int(label)}
+    base  = {"commit_hash": h, "message": (msg or "").strip(), "buggy": int(label)}
     empty = {**base, "avg_ccn": "", "avg_nloc": "", "func_count": 0, "avg_params": "", "file_count": 0}
 
     repo = hash_index.get(h)
@@ -383,8 +375,8 @@ def process_one_commit(args):
 def process_project(project: str, hash_index: dict,
                     hashes: list, labels: list, messages: list,
                     workers: int) -> Path:
-    out_path = DATASET_DIR / f"deepjit_{project}_lizard.csv"
-    fields   = ["commit_id", "message", "avg_ccn", "avg_nloc",
+    out_path = DEEPJIT_DIR / f"deepjit_{project}_lizard.csv"
+    fields   = ["commit_hash", "message", "avg_ccn", "avg_nloc",
                 "func_count", "avg_params", "file_count", "buggy"]
 
     total   = len(hashes)
@@ -405,7 +397,7 @@ def process_project(project: str, hash_index: dict,
             except Exception as e:
                 idx = futures[fut]
                 h, label, msg = hashes[idx], labels[idx], messages[idx]
-                row = {"commit_id": h, "message": (msg or "").strip(), "buggy": int(label),
+                row = {"commit_hash": h, "message": (msg or "").strip(), "buggy": int(label),
                        "avg_ccn": "", "avg_nloc": "", "func_count": 0, "avg_params": "", "file_count": 0}
                 status = "error"
             results[idx] = row
@@ -423,56 +415,21 @@ def process_project(project: str, hash_index: dict,
     return out_path
 
 
-# ── Pkl loader ─────────────────────────────────────────────────────────────────
+# ── Commits CSV loader ─────────────────────────────────────────────────────────
 
-def get_hf_token():
-    token = os.environ.get("HF_TOKEN")
-    if token:
-        return token
-    env_path = Path(__file__).parent.parent / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if line.startswith("HF_TOKEN="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    try:
-        from huggingface_hub import HfFolder
-        cached = HfFolder.get_token()
-        if cached:
-            return cached
-    except Exception:
-        pass
-    return None
-
-
-def load_pkl(project: str):
-    for candidate in [
-        DATASET_DIR / DEEPJIT_PKLS[project],
-        DATASET_DIR / "jit" / DEEPJIT_PKLS[project],
-    ]:
-        if candidate.exists():
-            print(f"  [{project}] loading from local: {candidate.name}")
-            with open(candidate, "rb") as f:
-                raw = pickle.load(f)
-            return raw[0], raw[1], raw[2]
-
-    token = get_hf_token()
-    if not token:
-        print(f"  [{project}] No HF token. Fix: export HF_TOKEN=... OR huggingface-cli login")
+def load_commits(project: str):
+    """Read hash, label, message for the FULL DeepJIT population of a project."""
+    path = DEEPJIT_DIR / f"deepjit_{project}_commits.csv"
+    if not path.exists():
+        print(f"  [{project}] missing {path}")
         return None, None, None
-
-    try:
-        from huggingface_hub import hf_hub_download
-        path = hf_hub_download(
-            "GitRatBCSAD/gomi-datasets",
-            f"jit/{DEEPJIT_PKLS[project]}",
-            repo_type="dataset", token=token,
-        )
-        with open(path, "rb") as f:
-            raw = pickle.load(f)
-        return raw[0], raw[1], raw[2]
-    except Exception as e:
-        print(f"  [{project}] pkl load failed: {e}")
-        return None, None, None
+    hashes, labels, messages = [], [], []
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            hashes.append(row["commit_hash"])
+            labels.append(int(float(row["buggy"])))
+            messages.append(row["message"])
+    return hashes, labels, messages
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -500,7 +457,7 @@ def main():
     verify_only, single_project, workers = parse_args()
 
     CLONE_DIR.mkdir(parents=True, exist_ok=True)
-    projects  = [single_project] if single_project else list(DEEPJIT_PKLS.keys())
+    projects  = [single_project] if single_project else DEEPJIT_PROJECTS
     out_files = []
 
     print(f"Workers: {workers}  |  Projects: {projects}")
@@ -509,9 +466,9 @@ def main():
         print(f"\n{'='*60}")
         print(f"Project: {project}")
 
-        hashes, labels, messages = load_pkl(project)
+        hashes, labels, messages = load_commits(project)
         if hashes is None:
-            print(f"  Skipping — pkl not loadable.")
+            print(f"  Skipping — commits CSV not loadable.")
             continue
 
         print(f"  Commits: {len(hashes)}  Buggy rate: {sum(labels)/len(labels):.2%}")
